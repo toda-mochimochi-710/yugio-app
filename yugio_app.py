@@ -5,13 +5,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
 
-# --- matplotlibの日本語化設定（文字化け防止） ---
 # --- matplotlibの日本語化設定 ---
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-plt.rcParams['font.sans-serif'] = ['Meiryo', 'MS Gothic', 'Yu Gothic', 'sans-serif']
+plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'IPAexGothic', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 
