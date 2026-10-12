@@ -48,6 +48,15 @@ def init_db():
             deck TEXT
         )
     ''')
+    # 【追加】デッキリスト・リスト名を保存するテーブル
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_decks (
+            username TEXT,
+            list_name TEXT,
+            deck_index INTEGER,
+            deck_name TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -105,8 +114,45 @@ def delete_list_data(username, list_name):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("DELETE FROM match_logs WHERE username = ? AND list_name = ?", (username, list_name))
+    c.execute("DELETE FROM user_decks WHERE username = ? AND list_name = ?", (username, list_name))
     conn.commit()
     conn.close()
+
+# --- デッキリストの読み込み・保存関数 ---
+def load_deck_lists(username):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT list_name, deck_index, deck_name FROM user_decks WHERE username = ?", (username,))
+    rows = c.fetchall()
+    conn.close()
+    
+    deck_lists = {}
+    if rows:
+        for list_name, idx, deck_name in rows:
+            if list_name not in deck_lists:
+                deck_lists[list_name] = [""] * 10
+            if 0 <= idx < 10:
+                deck_lists[list_name][idx] = deck_name
+    else:
+        # 初回などデータがない場合の初期値
+        deck_lists = {
+            "リスト1": ["エルフェン", "ドラテ(烙印ドラテ)", "獄神", "純烙印", "道化の一座", "妖精伝姫", "キラーチューン", "M∀LICE", "召喚獣(召喚獣ドラテ)", "閃刀姫"]
+        }
+    return deck_lists
+
+def save_deck_lists(username, deck_lists):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM user_decks WHERE username = ?", (username,))
+    for list_name, decks in deck_lists.items():
+        for idx, deck_name in enumerate(decks):
+            c.execute(
+                "INSERT INTO user_decks (username, list_name, deck_index, deck_name) VALUES (?, ?, ?, ?)",
+                (username, list_name, idx, deck_name)
+            )
+    conn.commit()
+    conn.close()
+
 
 # ==========================================
 # ログイン画面の制御
@@ -136,6 +182,8 @@ if not st.session_state.logged_in:
                 if result and check_password(password_input, result[0]):
                     st.session_state.logged_in = True
                     st.session_state.username = username_input
+                    # ログイン時にデータベースからユーザー専用のデッキリストを読み込む
+                    st.session_state.deck_lists = load_deck_lists(username_input)
                     st.success("ログイン成功しました！")
                     st.rerun()
                 else:
@@ -167,11 +215,9 @@ if not st.session_state.logged_in:
 # ログイン後のメインアプリ画面
 # ==========================================
 
-# セッション状態の初期化（デッキリスト管理）
+# セッション状態の初期化（未だ読み込まれていない場合の保険）
 if 'deck_lists' not in st.session_state:
-    st.session_state.deck_lists = {
-        "リスト1": ["エルフェン", "ドラテ(烙印ドラテ)", "獄神", "純烙印", "道化の一座", "妖精伝姫", "キラーチューン", "M∀LICE", "召喚獣(召喚獣ドラテ)", "閃刀姫"]
-    }
+    st.session_state.deck_lists = load_deck_lists(st.session_state.username)
 
 # ヘッダー & イラスト表示
 col_title, col_img = st.columns([4, 1])
@@ -187,6 +233,8 @@ with col_img:
 if st.sidebar.button("🚪 ログアウト"):
     st.session_state.logged_in = False
     st.session_state.username = ""
+    if 'deck_lists' in st.session_state:
+        del st.session_state.deck_lists
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -200,6 +248,8 @@ new_list_name = st.sidebar.text_input("新しいリスト名 (例: リスト2)")
 if st.sidebar.button("➕ リストを追加"):
     if new_list_name and new_list_name not in st.session_state.deck_lists:
         st.session_state.deck_lists[new_list_name] = [""] * 10
+        # データベースに保存
+        save_deck_lists(st.session_state.username, st.session_state.deck_lists)
         st.sidebar.success(f"「{new_list_name}」を追加しました！")
         st.rerun()
     elif not new_list_name:
@@ -221,6 +271,8 @@ for i in range(10):
 
 if st.sidebar.button("💾 変更を保存"):
     st.session_state.deck_lists[selected_list] = updated_decks
+    # 【変更点】データベースにデッキリストの変更を保存する
+    save_deck_lists(st.session_state.username, st.session_state.deck_lists)
     st.sidebar.success("保存しました！")
     st.rerun()
 
@@ -229,6 +281,8 @@ st.sidebar.markdown("---")
 if len(st.session_state.deck_lists) > 1:
     if st.sidebar.button(f"🗑️ 「{selected_list}」を削除する"):
         del st.session_state.deck_lists[selected_list]
+        # データベースからも削除して保存
+        save_deck_lists(st.session_state.username, st.session_state.deck_lists)
         delete_list_data(st.session_state.username, selected_list)
         st.sidebar.success(f"「{selected_list}」を削除しました！")
         st.rerun()
