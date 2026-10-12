@@ -6,8 +6,14 @@ import matplotlib.pyplot as plt
 import hashlib
 
 # --- matplotlibの日本語化設定（文字化け防止） ---
-plt.rcParams['font.sans-serif'] = ['Meiryo', 'MS Gothic', 'Yu Gothic']
+# --- matplotlibの日本語化設定 ---
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+plt.rcParams['font.sans-serif'] = ['Meiryo', 'MS Gothic', 'Yu Gothic', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
+
 
 # --- ページ設定（ワイド画面） ---
 st.set_page_config(
