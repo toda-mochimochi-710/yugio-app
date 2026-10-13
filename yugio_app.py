@@ -28,6 +28,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
 
+import json
+
+
+
 # --- Googleスプレッドシート接続の初期化 ---
 def get_gspread_client():
     scope = [
@@ -35,23 +39,22 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # 1. 自分のパソコン（ローカル）に credentials.json がある場合
+    # 1. ローカル環境（credentials.jsonがある場合）
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-    # 2. Streamlit Cloud の Secrets を使う場合
-    elif "gcp_service_account" in st.secrets:
-        # 秘密鍵の改行文字('\n')が崩れている場合に自動修復する処理
-        secret_dict = dict(st.secrets["gcp_service_account"])
-        if "private_key" in secret_dict:
-            secret_dict["private_key"] = secret_dict["private_key"].replace("\\n", "\n")
-            
-        creds = Credentials.from_service_account_info(secret_dict, scopes=scope)
+    # 2. Streamlit Cloud環境（Secretsに gcp_json が設定されている場合）
+    elif "gcp_json" in st.secrets:
+        # Secretsに保存したJSON文字列を辞書型に変換
+        key_dict = json.loads(st.secrets["gcp_json"])
+        creds = Credentials.from_service_account_info(key_dict, scopes=scope)
     else:
-        st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
+        st.error("❌ 認証情報が見つかりません。")
         st.stop()
         
     client = gspread.authorize(creds)
     return client
+
+
 
 def get_worksheet(sheet_name):
     try:
