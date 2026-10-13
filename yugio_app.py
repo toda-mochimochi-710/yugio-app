@@ -3,7 +3,6 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
-import matplotlib.font_manager as fm
 
 # --- matplotlibの設定 ---
 plt.rcParams['axes.unicode_minus'] = False
@@ -403,7 +402,7 @@ with col_input:
         st.info("データがありません。")
 
 
-# --- 右側：円グラフ（文字化け防止の凡例方式） ＆ 履歴明細 ---
+# --- 右側：円グラフ（文字化け完全防止・番号対応表方式） ＆ 履歴明細 ---
 col_graph.subheader(f"🍩 デッキ使用割合 ({selected_list})")
 
 df = load_match_data(st.session_state.username)
@@ -440,26 +439,32 @@ with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接�
     else:
         st.info("まだ対戦履歴がありません。左側の入力欄から記録を追加してください。")
 
-# 円グラフ描画（文字化け対策として文字ラベルを省き、凡例で綺麗に表示）
+# 円グラフ描画（グラフ内にはアルファベットや番号のみを表示し、文字化けを100%回避）
 if not df.empty:
     df_filtered = df[df["リスト名"] == selected_list].copy()
     if not df_filtered.empty and "デッキ" in df_filtered.columns:
         deck_counts = df_filtered["デッキ"].value_counts()
         if len(deck_counts) > 0:
-            fig, ax = plt.subplots(figsize=(6, 5))
-            # labelsを空にして文字化けを完全に防止し、autopctで割合のみ表示
-            wedges, texts, autotexts = ax.pie(
+            fig, ax = plt.subplots(figsize=(5, 4))
+            
+            # グラフ上のラベルには英語のインデックス（Deck A, Deck B...）を使用し、文字化けを完全に防ぐ
+            labels = [f"Deck {chr(65+i)}" for i in range(len(deck_counts))]
+            
+            ax.pie(
                 deck_counts, 
-                labels=None, 
+                labels=labels, 
                 autopct='%1.1f%%', 
                 startangle=90,
                 colors=plt.cm.Pastel1.colors,
                 textprops={'fontsize': 11, 'weight': 'bold'}
             )
             ax.axis('equal')
-            # わかりやすい凡例（レジェンド）を横に配置
-            ax.legend(wedges, deck_counts.index, title="デッキ名", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
             col_graph.pyplot(fig)
+            
+            # 下部に「Deck A = デッキ名」の対応表をテキストで綺麗に表示
+            col_graph.markdown("**【グラフのデッキ対応表】**")
+            legend_text = "  \n".join([f"**Deck {chr(65+i)}**: {deck_name} ({count}回)" for i, (deck_name, count) in enumerate(deck_counts.items())])
+            col_graph.markdown(legend_text)
         else:
             col_graph.info("グラフにするデータがありません。")
     else:
