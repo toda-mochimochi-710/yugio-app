@@ -30,7 +30,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
 
-# --- Googleスプレッドシート接続の初期化（Base64対応版） ---
+# --- Googleスプレッドシート接続の初期化（Base64対応・安全版） ---
 def get_gspread_client():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -40,21 +40,16 @@ def get_gspread_client():
     # 1. ローカル環境（credentials.jsonがある場合）
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-
-
     # 2. Streamlit Cloud環境（Base64エンコードされた Secrets がある場合）
     elif "gcp_base64" in st.secrets:
         try:
-            # 前後の空白や誤って入ったクォーテーションを自動で取り除く処理を追加
             base64_str = st.secrets["gcp_base64"].strip().strip('"').strip("'")
-            json_str = base64.b64decode(base64_str).decode("utf-8")
-            key_dict = json.loads(json_str)
+            decoded_bytes = base64.b64decode(base64_str)
+            key_dict = json.loads(decoded_bytes.decode("utf-8", errors="ignore"))
             creds = Credentials.from_service_account_info(key_dict, scopes=scope)
         except Exception as e:
             st.error(f"❌ Base64シークレットのデコードに失敗しました。設定を確認してください。\nエラー詳細: {e}")
             st.stop()
-
-            
     else:
         st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
         st.stop()
