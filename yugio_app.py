@@ -3,14 +3,15 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
+import matplotlib.font_manager as fm
 
-# --- matplotlibの日本語化設定 ---
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-
-plt.rcParams['font.sans-serif'] = ['Meiryo', 'MS Gothic', 'Yu Gothic', 'DejaVu Sans']
+# --- matplotlibの日本語化設定（Linux/Cloud環境対応） ---
 plt.rcParams['axes.unicode_minus'] = False
+font_names = [f.name for f in fm.fontManager.ttflist]
+for target in ['Meiryo', 'MS Gothic', 'Yu Gothic', 'DejaVu Sans', 'TakaoPGothic', 'IPAexGothic']:
+    if target in font_names:
+        plt.rcParams['font.sans-serif'] = [target]
+        break
 
 # --- ページ設定 ---
 st.set_page_config(
@@ -19,7 +20,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- ファイルパスの設定（リポジトリ内にCSVとしてデータを保存） ---
+# --- ファイルパスの設定 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 DATA_FILE = os.path.join(BASE_DIR, "yugio_match_data.csv")
@@ -38,7 +39,6 @@ def load_users():
     if os.path.exists(USERS_FILE):
         return pd.read_csv(USERS_FILE)
     else:
-        # 初期ユーザー（とだ / Ryoma710）を作成
         df_init = pd.DataFrame([{"username": "とだ", "password": make_hash("Ryoma710")}])
         df_init.to_csv(USERS_FILE, index=False)
         return df_init
@@ -53,8 +53,7 @@ def get_user_password(username_input):
 def register_user(username_input, password_input):
     df_users = load_users()
     if not df_users[df_users["username"] == username_input].empty:
-        return False  # すでに存在するユーザー
-    
+        return False
     hashed_pw = make_hash(password_input)
     new_row = pd.DataFrame([{"username": username_input, "password": hashed_pw}])
     df_users = pd.concat([df_users, new_row], ignore_index=True)
@@ -62,19 +61,34 @@ def register_user(username_input, password_input):
     return True
 
 # --- 対戦履歴データ管理関数 ---
-def load_match_data(username):
+def load_match_data_all():
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
-        # 必要なカラムのチェックと補正
-        if "username" in df.columns:
-            user_df = df[df["username"] == username]
-            if not user_df.empty:
-                # 古い列名や形式の調整
-                if "list_name" in user_df.columns:
-                    res_df = user_df[["list_name", "coin", "result", "deck", "memo"]].copy()
-                    res_df.columns = ["リスト名", "コイン", "勝敗", "デッキ", "理由"]
-                    return res_df
-    return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
+        expected_cols = ["username", "list_name", "coin", "result", "deck", "memo"]
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = ""
+        return df
+    else:
+        return pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
+
+def load_match_data(username):
+    df_all = load_match_data_all()
+    if df_all.empty:
+        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
+    
+    user_df = df_all[df_all["username"] == username].copy()
+    if user_df.empty:
+        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
+    
+    res_df = pd.DataFrame({
+        "リスト名": user_df["list_name"].astype(str),
+        "コイン": user_df["coin"].astype(str),
+        "勝敗": user_df["result"].astype(str),
+        "デッキ": user_df["deck"].astype(str),
+        "理由": user_df["memo"].fillna("").astype(str)
+    })
+    return res_df.reset_index(drop=True)
 
 def save_match_data(username, list_name, coin, result, deck, memo):
     df_all = load_match_data_all()
@@ -89,46 +103,46 @@ def save_match_data(username, list_name, coin, result, deck, memo):
     df_all = pd.concat([df_all, new_row], ignore_index=True)
     df_all.to_csv(DATA_FILE, index=False)
 
-def load_match_data_all():
-    if os.path.exists(DATA_FILE):
-        return pd.read_csv(DATA_FILE)
-    else:
-        return pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
-
 def delete_last_match(username, selected_list):
     df_all = load_match_data_all()
-    user_rows = df_all[(df_all["username"] == username) & (df_all["list_name"] == selected_list)]
-    if user_rows.empty:
+    if df_all.empty:
         return False
-    # 最後の1行を削除
-    last_idx = user_rows.index[-1]
+    user_mask = (df_all["username"] == username) & (df_all["list_name"] == selected_list)
+    user_indices = df_all[user_mask].index
+    if len(user_indices) == 0:
+        return False
+    last_idx = user_indices[-1]
     df_all = df_all.drop(last_idx)
     df_all.to_csv(DATA_FILE, index=False)
     return True
 
 def delete_list_data(username, selected_list):
     df_all = load_match_data_all()
-    df_all = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
-    df_all.to_csv(DATA_FILE, index=False)
+    if not df_all.empty:
+        df_all = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
+        df_all.to_csv(DATA_FILE, index=False)
 
     df_decks = load_all_decks_raw()
-    df_decks = df_decks[~((df_decks["username"] == username) & (df_decks["list_name"] == selected_list))]
-    df_decks.to_csv(DECKS_FILE, index=False)
+    if not df_decks.empty:
+        df_decks = df_decks[~((df_decks["username"] == username) & (df_decks["list_name"] == selected_list))]
+        df_decks.to_csv(DECKS_FILE, index=False)
 
 def update_all_match_data_for_user(username, selected_list, new_filtered_df):
     df_all = load_match_data_all()
-    # 他のユーザー・他のリストのデータを保持
-    df_other = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
+    if not df_all.empty:
+        df_other = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
+    else:
+        df_other = pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
     
     new_rows = []
     for _, r in new_filtered_df.iterrows():
         new_rows.append({
             "username": username,
             "list_name": selected_list,
-            "coin": r["コイン"],
-            "result": r["勝敗"],
-            "deck": r["デッキ"],
-            "memo": r["理由"] if pd.notna(r["理由"]) else ""
+            "coin": str(r["コイン"]),
+            "result": str(r["勝敗"]),
+            "deck": str(r["デッキ"]),
+            "memo": str(r["理由"]) if pd.notna(r["理由"]) else ""
         })
     df_new = pd.DataFrame(new_rows)
     df_combined = pd.concat([df_other, df_new], ignore_index=True)
@@ -136,6 +150,17 @@ def update_all_match_data_for_user(username, selected_list, new_filtered_df):
 
 
 # --- デッキリストデータ管理関数 ---
+def load_all_decks_raw():
+    if os.path.exists(DECKS_FILE):
+        df = pd.read_csv(DECKS_FILE)
+        expected_cols = ["username", "list_name", "deck_index", "deck_name"]
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = ""
+        return df
+    else:
+        return pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
+
 def load_deck_lists(username):
     df_decks = load_all_decks_raw()
     user_rows = df_decks[df_decks["username"] == username]
@@ -144,7 +169,7 @@ def load_deck_lists(username):
     if not user_rows.empty:
         for _, r in user_rows.iterrows():
             list_name = str(r["list_name"])
-            idx = int(r["deck_index"])
+            idx = int(r["deck_index"]) if pd.notna(r["deck_index"]) else 0
             deck_name = str(r["deck_name"]) if pd.notna(r["deck_name"]) else ""
             
             if list_name not in deck_lists:
@@ -157,15 +182,12 @@ def load_deck_lists(username):
         }
     return deck_lists
 
-def load_all_decks_raw():
-    if os.path.exists(DECKS_FILE):
-        return pd.read_csv(DECKS_FILE)
-    else:
-        return pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
-
 def save_deck_lists(username, deck_lists):
     df_all = load_all_decks_raw()
-    df_other = df_all[df_all["username"] != username]
+    if not df_all.empty:
+        df_other = df_all[df_all["username"] != username]
+    else:
+        df_other = pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
     
     new_rows = []
     for list_name, decks in deck_lists.items():
@@ -201,7 +223,6 @@ if not st.session_state.logged_in:
         if choice == "ログイン":
             if st.button("🚀 ログイン"):
                 stored_pw = get_user_password(username_input)
-                
                 if stored_pw and check_password(password_input, stored_pw):
                     st.session_state.logged_in = True
                     st.session_state.username = username_input
@@ -391,12 +412,44 @@ with col_input:
 col_graph.subheader(f"🍩 デッキ使用割合 ({selected_list})")
 
 df = load_match_data(st.session_state.username)
+
+# 常にエクスパンダーとテーブルを表示するように修正
+with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接編集が可能）", expanded=True):
+    st.markdown("💡下の表の「理由」欄をクリックすると、後からでも自由に入力・編集できます。編集後は下のボタンを押して保存してください！")
+    
+    if not df.empty:
+        df_filtered = df[df["リスト名"] == selected_list].copy()
+    else:
+        df_filtered = pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
+    
+    if not df_filtered.empty:
+        df_display = df_filtered[["コイン", "勝敗", "デッキ", "理由"]].reset_index(drop=True)
+        
+        edited_df = st.data_editor(
+            df_display,
+            column_config={
+                "コイン": st.column_config.TextColumn("コイン", disabled=True),
+                "勝敗": st.column_config.TextColumn("勝敗", disabled=True),
+                "デッキ": st.column_config.TextColumn("デッキ", disabled=True),
+                "理由": st.column_config.TextColumn("理由 (クリックして編集可能)", width="large"),
+            },
+            use_container_width=True,
+            key=f"editor_{selected_list}"
+        )
+        
+        if st.button("💾 メモの変更を保存する"):
+            edited_df["リスト名"] = selected_list
+            update_all_match_data_for_user(st.session_state.username, selected_list, edited_df)
+            st.success("✨ メモの変更を保存しました！")
+            st.rerun()
+    else:
+        st.info("まだ対戦履歴がありません。左側の入力欄から記録を追加してください。")
+
+# グラフ描画部分
 if not df.empty:
     df_filtered = df[df["リスト名"] == selected_list].copy()
-    
     if not df_filtered.empty and "デッキ" in df_filtered.columns:
         deck_counts = df_filtered["デッキ"].value_counts()
-        
         if len(deck_counts) > 0:
             fig, ax = plt.subplots(figsize=(6, 6))
             ax.pie(
@@ -411,29 +464,6 @@ if not df.empty:
             col_graph.pyplot(fig)
         else:
             col_graph.info("グラフにするデータがありません。")
-        
-        with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接編集が可能）"):
-            st.markdown("💡下の表の「理由」欄をクリックすると、後からでも自由に入力・編集できます。編集後は下のボタンを押して保存してください！")
-            
-            df_display = df_filtered[["コイン", "勝敗", "デッキ", "理由"]].reset_index(drop=True)
-            
-            edited_df = st.data_editor(
-                df_display,
-                column_config={
-                    "コイン": st.column_config.TextColumn("コイン", disabled=True),
-                    "勝敗": st.column_config.TextColumn("勝敗", disabled=True),
-                    "デッキ": st.column_config.TextColumn("デッキ", disabled=True),
-                    "理由": st.column_config.TextColumn("理由 (クリックして編集可能)", width="large"),
-                },
-                use_container_width=True,
-                key=f"editor_{selected_list}"
-            )
-            
-            if st.button("💾 メモの変更を保存する"):
-                edited_df["リスト名"] = selected_list
-                update_all_match_data_for_user(st.session_state.username, selected_list, edited_df)
-                st.success("✨ メモの変更を保存しました！")
-                st.rerun()
     else:
         col_graph.info("グラフにするデータがありません。")
 else:
