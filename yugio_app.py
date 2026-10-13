@@ -11,7 +11,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'IPAexGothic', 'DejaVu Sans']
+# Windowsの標準的な日本語フォント（メイリオなど）を指定
+plt.rcParams['font.sans-serif'] = ['Meiryo', 'MS Gothic', 'Yu Gothic', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 
@@ -44,7 +45,6 @@ def get_gspread_client():
 def get_worksheet(sheet_name):
     try:
         client = get_gspread_client()
-        # スプレッドシート名「遊戯王対戦管理データ」を開く
         spreadsheet = client.open("遊戯王対戦管理データ")
         worksheet = spreadsheet.worksheet(sheet_name)
         return worksheet
@@ -77,7 +77,7 @@ def register_user(username_input, password_input):
     records = ws.get_all_records()
     for row in records:
         if str(row.get("username")) == str(username_input):
-            return False # すでに存在する
+            return False
     hashed_pw = make_hash(password_input)
     ws.append_row([username_input, hashed_pw])
     return True
@@ -88,24 +88,25 @@ def load_match_data(username):
     ws = get_worksheet("match_logs")
     records = ws.get_all_records()
     
-    # 該当ユーザーのデータだけをフィルタリング
     user_rows = [r for r in records if str(r.get("username")) == str(username)]
     
     if not user_rows:
-        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ"])
+        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
     
     df = pd.DataFrame(user_rows)
-    # 必要なカラムに絞る
     if "list_name" in df.columns:
-        df = df[["list_name", "coin", "result", "deck"]]
-        df.columns = ["リスト名", "コイン", "勝敗", "デッキ"]
+        if "memo" not in df.columns:
+            df["memo"] = ""
+            
+        df = df[["list_name", "coin", "result", "deck", "memo"]]
+        df.columns = ["リスト名", "コイン", "勝敗", "デッキ", "理由"]
     else:
-        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ"])
+        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
     return df
 
-def save_match_data(username, list_name, coin, result, deck):
+def save_match_data(username, list_name, coin, result, deck, memo):
     ws = get_worksheet("match_logs")
-    ws.append_row([username, list_name, coin, result, deck])
+    ws.append_row([username, list_name, coin, result, deck, memo])
 
 def delete_last_match(username, list_name):
     ws = get_worksheet("match_logs")
@@ -113,16 +114,12 @@ def delete_last_match(username, list_name):
     if len(data) <= 1:
         return False
     
-    header = data[0]
     rows = data[1:]
-    
-    # 後ろから順に該当する行を探す
     target_idx = -1
     for i in range(len(rows) - 1, -1, -1):
         row = rows[i]
-        # 列のインデックス構成: username(0), list_name(1), coin(2), result(3), deck(4)
         if len(row) >= 2 and row[0] == username and row[1] == list_name:
-            target_idx = i + 2  # 1-indexedかつヘッダーを考慮
+            target_idx = i + 2
             break
             
     if target_idx != -1:
@@ -131,18 +128,15 @@ def delete_last_match(username, list_name):
     return False
 
 def delete_list_data(username, list_name):
-    # match_logsから削除
     ws_logs = get_worksheet("match_logs")
     data_logs = ws_logs.get_all_values()
     if len(data_logs) > 1:
         header = data_logs[0]
         rows = data_logs[1:]
-        # 残す行だけを抽出
         new_rows = [header] + [r for r in rows if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
         ws_logs.clear()
         ws_logs.update(new_rows)
         
-    # user_decksからも削除
     ws_decks = get_worksheet("user_decks")
     data_decks = ws_decks.get_all_values()
     if len(data_decks) > 1:
@@ -151,6 +145,28 @@ def delete_list_data(username, list_name):
         new_rows_d = [header_d] + [r for r in rows_d if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
         ws_decks.clear()
         ws_decks.update(new_rows_d)
+
+def update_all_match_data_for_user(username, list_name, new_df_filtered):
+    """ユーザーの特定リストの対戦履歴（主にメモの編集反映）をスプレッドシートに上書き保存する"""
+    ws = get_worksheet("match_logs")
+    data = ws.get_all_values()
+    if not data:
+        return
+    header = data[0]
+    rows = data[1:]
+    
+    # 該当ユーザーの他リストのデータ ＆ 他ユーザーのデータを保持
+    other_rows = [r for r in rows if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
+    
+    # 今回更新されたリストの新しい行データを作成
+    updated_user_rows = []
+    for _, r in new_df_filtered.iterrows():
+        # 格納順: username, list_name, coin, result, deck, memo
+        updated_user_rows.append([username, list_name, r["コイン"], r["勝敗"], r["デッキ"], r["理由"]])
+        
+    final_data = [header] + other_rows + updated_user_rows
+    ws.clear()
+    ws.update(final_data)
 
 
 # 3. デッキリスト関連
@@ -172,7 +188,6 @@ def load_deck_lists(username):
             if 0 <= idx < 10:
                 deck_lists[list_name][idx] = deck_name
     else:
-        # 初回などデータがない場合の初期値
         deck_lists = {
             "リスト1": ["エルフェン", "ドラテ(烙印ドラテ)", "獄神", "純烙印", "道化の一座", "妖精伝姫", "キラーチューン", "M∀LICE", "召喚獣(召喚獣ドラテ)", "閃刀姫"]
         }
@@ -183,11 +198,9 @@ def save_deck_lists(username, deck_lists):
     data = ws.get_all_values()
     header = data[0] if len(data) > 0 else ["username", "list_name", "deck_index", "deck_name"]
     
-    # 該当ユーザー以外の既存データを保持
     rows = data[1:] if len(data) > 1 else []
     other_user_rows = [r for r in rows if len(r) >= 1 and r[0] != username]
     
-    # 新しいユーザーデータを構築
     new_user_rows = []
     for list_name, decks in deck_lists.items():
         for idx, deck_name in enumerate(decks):
@@ -228,7 +241,6 @@ if not st.session_state.logged_in:
                 else:
                     st.error("ユーザー名またはパスワードが間違っています。")
         else:
-        # 新規登録
             if st.button("✨ 登録する"):
                 if not username_input or not password_input:
                     st.warning("ユーザー名とパスワードを入力してください。")
@@ -248,7 +260,6 @@ if not st.session_state.logged_in:
 if 'deck_lists' not in st.session_state:
     st.session_state.deck_lists = load_deck_lists(st.session_state.username)
 
-# ヘッダー & イラスト表示
 col_title, col_img = st.columns([4, 1])
 with col_title:
     st.title(f"🎮 遊戯王 対戦管理アプリ (ログイン中: {st.session_state.username} さん)")
@@ -258,7 +269,6 @@ with col_img:
     if os.path.exists(IMAGE_FILE):
         st.image(IMAGE_FILE, width=120)
 
-# ログアウトボタンをサイドバーに配置
 if st.sidebar.button("🚪 ログアウト"):
     st.session_state.logged_in = False
     st.session_state.username = ""
@@ -303,7 +313,6 @@ if st.sidebar.button("💾 変更を保存"):
     st.sidebar.success("保存しました！")
     st.rerun()
 
-# --- デッキリストの削除機能 ---
 st.sidebar.markdown("---")
 if len(st.session_state.deck_lists) > 1:
     if st.sidebar.button(f"🗑️ 「{selected_list}」を削除する"):
@@ -339,6 +348,7 @@ with col_input:
         st.markdown("・コイン: `1`=○, `2`=✖  /  勝敗: `1`=○, `2`=✖")
         
         user_input = st.text_input("入力欄 (例: 1 1 3)")
+        memo_input = st.text_input("対戦の理由・メモ (任意 例: G通った、事故など)")
         submitted = st.form_submit_button("🚀 記録する")
         
         if submitted:
@@ -361,15 +371,13 @@ with col_input:
                     else:
                         d_val = active_decks[d_idx - 1]
                         
-                        # スプレッドシートに保存
-                        save_match_data(st.session_state.username, selected_list, c_val, w_val, d_val)
+                        save_match_data(st.session_state.username, selected_list, c_val, w_val, d_val, memo_input)
                         
                         st.success(f"👉 記録しました！ コイン:{c_val} / 勝敗:{w_val} / デッキ:{d_val}")
                         st.rerun()
                 except ValueError:
                     st.error("❌ 半角数字で入力してください。")
 
-    # --- 直前の記録を削除するボタン ---
     if st.button("↩️ 直前の記録を1件削除する"):
         success = delete_last_match(st.session_state.username, selected_list)
         if success:
@@ -404,17 +412,17 @@ with col_input:
             }
             st.table(pd.DataFrame(summary_data))
         else:
-            st.info(f"「{selected_list}」のデータはまだありません。")
+            st.info(f"`{selected_list}` のデータはまだありません。")
     else:
         st.info("データがありません。")
 
 
-# --- 右側：円グラフ ＆ 履歴明細 ---
+# --- 右側：円グラフ ＆ 履歴明細（直接編集対応） ---
 col_graph.subheader(f"🍩 デッキ使用割合 ({selected_list})")
 
 df = load_match_data(st.session_state.username)
 if not df.empty:
-    df_filtered = df[df["リスト名"] == selected_list]
+    df_filtered = df[df["リスト名"] == selected_list].copy()
     
     if not df_filtered.empty and "デッキ" in df_filtered.columns:
         deck_counts = df_filtered["デッキ"].value_counts()
@@ -434,8 +442,44 @@ if not df.empty:
         else:
             col_graph.info("グラフにするデータがありません。")
         
-        with col_graph.expander("📜 対戦履歴の明細を見る"):
-            st.dataframe(df_filtered[["コイン", "勝敗", "デッキ"]], use_container_width=True)
+        with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接編集が可能）"):
+            st.markdown("💡下の表の「理由」欄をクリックすると、後からでも自由に入力・編集できます。編集後は下のボタンを押して保存してください！")
+            
+            # プレビュー・編集用データフレーム（インデックスをリセット）
+            df_display = df_filtered[["コイン", "勝敗", "デッキ", "理由"]].reset_index(drop=True)
+            
+            # st.data_editor を使って表上で直接文字入力・編集ができるようにする
+            edited_df = st.data_editor(
+                df_display,
+                column_config={
+                    "コイン": st.column_config.TextColumn("コイン", disabled=True),
+                    "勝敗": st.column_config.TextColumn("勝敗", disabled=True),
+                    "デッキ": st.column_config.TextColumn("デッキ", disabled=True),
+                    "理由": st.column_config.TextColumn("理由 (クリックして編集可能)", width="large"),
+                },
+                use_container_width=True,
+                key=f"editor_{selected_list}"
+            )
+            
+            if st.button("💾 メモの変更を保存する"):
+                # ユーザー全体のデータフレームから、別リストのデータを保持しつつ、編集されたリスト部分を差し替える
+                df_all = load_match_data(st.session_state.username)
+                
+                # 選択中リスト以外のデータ
+                df_other = df_all[df_all["リスト名"] != selected_list]
+                
+                # 編集されたリストデータにリスト名を付与
+                edited_df["リスト名"] = selected_list
+                # カラム順を整える
+                edited_df = edited_df[["リスト名", "コイン", "勝敗", "デッキ", "理由"]]
+                
+                # 全データを結合
+                df_combined = pd.concat([df_other, edited_df], ignore_index=True)
+                
+                # スプレッドシートに反映
+                update_all_match_data_for_user(st.session_state.username, selected_list, df_combined[df_combined["リスト名"] == selected_list])
+                st.success("✨ メモの変更をスプレッドシートに保存しました！")
+                st.rerun()
     else:
         col_graph.info("グラフにするデータがありません。")
 else:
