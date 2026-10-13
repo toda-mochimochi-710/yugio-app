@@ -3,6 +3,8 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
+import json
+import base64
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -28,11 +30,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
 
-import json
-
-
-
-# --- Googleスプレッドシート接続の初期化 ---
+# --- Googleスプレッドシート接続の初期化（Base64対応版） ---
 def get_gspread_client():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -42,19 +40,22 @@ def get_gspread_client():
     # 1. ローカル環境（credentials.jsonがある場合）
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-    # 2. Streamlit Cloud環境（Secretsに gcp_json が設定されている場合）
-    elif "gcp_json" in st.secrets:
-        # Secretsに保存したJSON文字列を辞書型に変換
-        key_dict = json.loads(st.secrets["gcp_json"])
-        creds = Credentials.from_service_account_info(key_dict, scopes=scope)
+    # 2. Streamlit Cloud環境（Base64エンコードされた Secrets がある場合）
+    elif "gcp_base64" in st.secrets:
+        try:
+            base64_str = st.secrets["gcp_base64"]
+            json_str = base64.b64decode(base64_str).decode("utf-8")
+            key_dict = json.loads(json_str)
+            creds = Credentials.from_service_account_info(key_dict, scopes=scope)
+        except Exception as e:
+            st.error(f"❌ Base64シークレットのデコードに失敗しました。設定を確認してください。\nエラー詳細: {e}")
+            st.stop()
     else:
-        st.error("❌ 認証情報が見つかりません。")
+        st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
         st.stop()
         
     client = gspread.authorize(creds)
     return client
-
-
 
 def get_worksheet(sheet_name):
     try:
@@ -161,7 +162,6 @@ def delete_list_data(username, list_name):
         ws_decks.update(new_rows_d)
 
 def update_all_match_data_for_user(username, list_name, new_df_filtered):
-    """ユーザーの特定リストの対戦履歴（主にメモの編集反映）をスプレッドシートに上書き保存する"""
     ws = get_worksheet("match_logs")
     data = ws.get_all_values()
     if not data:
@@ -169,13 +169,10 @@ def update_all_match_data_for_user(username, list_name, new_df_filtered):
     header = data[0]
     rows = data[1:]
     
-    # 該当ユーザーの他リストのデータ ＆ 他ユーザーのデータを保持
     other_rows = [r for r in rows if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
     
-    # 今回更新されたリストの新しい行データを作成
     updated_user_rows = []
     for _, r in new_df_filtered.iterrows():
-        # 格納順: username, list_name, coin, result, deck, memo
         updated_user_rows.append([username, list_name, r["コイン"], r["勝敗"], r["デッキ"], r["理由"]])
         
     final_data = [header] + other_rows + updated_user_rows
@@ -426,7 +423,7 @@ with col_input:
             }
             st.table(pd.DataFrame(summary_data))
         else:
-            st.info(f"`{selected_list}` のデータはまだありません。")
+            st.info(f"「{selected_list}」のデータはまだありません。")
     else:
         st.info("データがありません。")
 
@@ -459,10 +456,8 @@ if not df.empty:
         with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接編集が可能）"):
             st.markdown("💡下の表の「理由」欄をクリックすると、後からでも自由に入力・編集できます。編集後は下のボタンを押して保存してください！")
             
-            # プレビュー・編集用データフレーム（インデックスをリセット）
             df_display = df_filtered[["コイン", "勝敗", "デッキ", "理由"]].reset_index(drop=True)
             
-            # st.data_editor を使って表上で直接文字入力・編集ができるようにする
             edited_df = st.data_editor(
                 df_display,
                 column_config={
@@ -476,21 +471,14 @@ if not df.empty:
             )
             
             if st.button("💾 メモの変更を保存する"):
-                # ユーザー全体のデータフレームから、別リストのデータを保持しつつ、編集されたリスト部分を差し替える
                 df_all = load_match_data(st.session_state.username)
-                
-                # 選択中リスト以外のデータ
                 df_other = df_all[df_all["リスト名"] != selected_list]
                 
-                # 編集されたリストデータにリスト名を付与
                 edited_df["リスト名"] = selected_list
-                # カラム順を整える
                 edited_df = edited_df[["リスト名", "コイン", "勝敗", "デッキ", "理由"]]
                 
-                # 全データを結合
                 df_combined = pd.concat([df_other, edited_df], ignore_index=True)
                 
-                # スプレッドシートに反映
                 update_all_match_data_for_user(st.session_state.username, selected_list, df_combined[df_combined["リスト名"] == selected_list])
                 st.success("✨ メモの変更をスプレッドシートに保存しました！")
                 st.rerun()
@@ -498,3 +486,4 @@ if not df.empty:
         col_graph.info("グラフにするデータがありません。")
 else:
     col_graph.info("データがありません。")
+    
