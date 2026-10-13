@@ -34,11 +34,19 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    if not os.path.exists(CRED_FILE):
-        st.error("❌ 認証ファイル 'credentials.json' が見つかりません。ファイルの位置を確認してください。")
-        st.stop()
     
-    creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
+    # 1. まず自分のパソコン（ローカル）に credentials.json がある場合はそちらを優先する
+    if os.path.exists(CRED_FILE):
+        creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
+    # 2. なければ Streamlit Cloud の Secrets を探す
+    elif "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=scope
+        )
+    else:
+        st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
+        st.stop()
+        
     client = gspread.authorize(creds)
     return client
 
