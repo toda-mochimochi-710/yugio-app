@@ -5,13 +5,8 @@ import matplotlib.pyplot as plt
 import hashlib
 import matplotlib.font_manager as fm
 
-# --- matplotlibの日本語化設定（Linux/Cloud環境対応） ---
+# --- matplotlibの設定 ---
 plt.rcParams['axes.unicode_minus'] = False
-font_names = [f.name for f in fm.fontManager.ttflist]
-for target in ['Meiryo', 'MS Gothic', 'Yu Gothic', 'DejaVu Sans', 'TakaoPGothic', 'IPAexGothic']:
-    if target in font_names:
-        plt.rcParams['font.sans-serif'] = [target]
-        break
 
 # --- ページ設定 ---
 st.set_page_config(
@@ -408,12 +403,12 @@ with col_input:
         st.info("データがありません。")
 
 
-# --- 右側：円グラフ ＆ 履歴明細（直接編集対応） ---
+# --- 右側：円グラフ（文字化け防止の凡例方式） ＆ 履歴明細 ---
 col_graph.subheader(f"🍩 デッキ使用割合 ({selected_list})")
 
 df = load_match_data(st.session_state.username)
 
-# 常にエクスパンダーとテーブルを表示するように修正
+# 履歴明細（直接編集対応）
 with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接編集が可能）", expanded=True):
     st.markdown("💡下の表の「理由」欄をクリックすると、後からでも自由に入力・編集できます。編集後は下のボタンを押して保存してください！")
     
@@ -445,22 +440,25 @@ with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接�
     else:
         st.info("まだ対戦履歴がありません。左側の入力欄から記録を追加してください。")
 
-# グラフ描画部分
+# 円グラフ描画（文字化け対策として文字ラベルを省き、凡例で綺麗に表示）
 if not df.empty:
     df_filtered = df[df["リスト名"] == selected_list].copy()
     if not df_filtered.empty and "デッキ" in df_filtered.columns:
         deck_counts = df_filtered["デッキ"].value_counts()
         if len(deck_counts) > 0:
-            fig, ax = plt.subplots(figsize=(6, 6))
-            ax.pie(
+            fig, ax = plt.subplots(figsize=(6, 5))
+            # labelsを空にして文字化けを完全に防止し、autopctで割合のみ表示
+            wedges, texts, autotexts = ax.pie(
                 deck_counts, 
-                labels=deck_counts.index, 
+                labels=None, 
                 autopct='%1.1f%%', 
                 startangle=90,
                 colors=plt.cm.Pastel1.colors,
-                textprops={'fontsize': 12}
+                textprops={'fontsize': 11, 'weight': 'bold'}
             )
             ax.axis('equal')
+            # わかりやすい凡例（レジェンド）を横に配置
+            ax.legend(wedges, deck_counts.index, title="デッキ名", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
             col_graph.pyplot(fig)
         else:
             col_graph.info("グラフにするデータがありません。")
