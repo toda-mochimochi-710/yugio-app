@@ -3,8 +3,6 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
-import gspread
-from google.oauth2.service_account import Credentials
 
 # --- matplotlibの日本語化設定 ---
 import matplotlib
@@ -21,58 +19,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- ファイルパスの設定 ---
+# --- ファイルパスの設定（リポジトリ内にCSVとしてデータを保存） ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
-CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
-
-# --- Googleスプレッドシート接続の初期化（シンプル確実版） ---
-def get_gspread_client():
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
-    # 1. ローカル環境（credentials.jsonがある場合）
-    if os.path.exists(CRED_FILE):
-        creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-    # 2. Streamlit Cloud環境（Secretsから直接読み込む場合）
-    elif "gcp_service_account" in st.secrets:
-        sec = st.secrets["gcp_service_account"]
-        raw_key = str(sec["private_key"])
-        fixed_key = raw_key.replace("\\n", "\n")
-        
-        key_dict = {
-            "type": sec["type"],
-            "project_id": sec["project_id"],
-            "private_key_id": sec["private_key_id"],
-            "private_key": fixed_key,
-            "client_email": sec["client_email"],
-            "client_id": sec["client_id"],
-            "auth_uri": sec["auth_uri"],
-            "token_uri": sec["token_uri"],
-            "auth_provider_x509_cert_url": sec["auth_provider_x509_cert_url"],
-            "client_x509_cert_url": sec["client_x509_cert_url"],
-            "universe_domain": sec.get("universe_domain", "googleapis.com")
-        }
-        creds = Credentials.from_service_account_info(key_dict, scopes=scope)
-    else:
-        st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
-        st.stop()
-        
-    client = gspread.authorize(creds)
-    return client
-
-def get_worksheet(sheet_name):
-    try:
-        client = get_gspread_client()
-        spreadsheet = client.open("遊戯王対戦管理データ")
-        worksheet = spreadsheet.worksheet(sheet_name)
-        return worksheet
-    except Exception as e:
-        st.error(f"❌ Googleスプレッドシート「遊戯王対戦管理データ」のシート「{sheet_name}」が見つかりません。スプレッドシート名やタブ名を確認してください。\nエラー詳細: {e}")
-        st.stop()
-
+DATA_FILE = os.path.join(BASE_DIR, "yugio_match_data.csv")
+DECKS_FILE = os.path.join(BASE_DIR, "yugio_deck_data.csv")
+USERS_FILE = os.path.join(BASE_DIR, "yugio_users.csv")
 
 # --- パスワードのハッシュ化 ---
 def make_hash(password):
@@ -81,124 +33,119 @@ def make_hash(password):
 def check_password(password, hashed_password):
     return make_hash(password) == hashed_password
 
+# --- ユーザー管理関数（CSVベース） ---
+def load_users():
+    if os.path.exists(USERS_FILE):
+        return pd.read_csv(USERS_FILE)
+    else:
+        # 初期ユーザー（とだ / Ryoma710）を作成
+        df_init = pd.DataFrame([{"username": "とだ", "password": make_hash("Ryoma710")}])
+        df_init.to_csv(USERS_FILE, index=False)
+        return df_init
 
-# --- データベース操作（スプレッドシート版） ---
-
-# 1. ユーザー認証関連
 def get_user_password(username_input):
-    ws = get_worksheet("users")
-    records = ws.get_all_records()
-    for row in records:
-        if str(row.get("username")) == str(username_input):
-            return row.get("password")
+    df_users = load_users()
+    for _, row in df_users.iterrows():
+        if str(row["username"]) == str(username_input):
+            return row["password"]
     return None
 
 def register_user(username_input, password_input):
-    ws = get_worksheet("users")
-    records = ws.get_all_records()
-    for row in records:
-        if str(row.get("username")) == str(username_input):
-            return False
+    df_users = load_users()
+    if not df_users[df_users["username"] == username_input].empty:
+        return False  # すでに存在するユーザー
+    
     hashed_pw = make_hash(password_input)
-    ws.append_row([username_input, hashed_pw])
+    new_row = pd.DataFrame([{"username": username_input, "password": hashed_pw}])
+    df_users = pd.concat([df_users, new_row], ignore_index=True)
+    df_users.to_csv(USERS_FILE, index=False)
     return True
 
-
-# 2. 対戦履歴関連
+# --- 対戦履歴データ管理関数 ---
 def load_match_data(username):
-    ws = get_worksheet("match_logs")
-    records = ws.get_all_records()
-    
-    user_rows = [r for r in records if str(r.get("username")) == str(username)]
-    
-    if not user_rows:
-        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
-    
-    df = pd.DataFrame(user_rows)
-    if "list_name" in df.columns:
-        if "memo" not in df.columns:
-            df["memo"] = ""
-            
-        df = df[["list_name", "coin", "result", "deck", "memo"]]
-        df.columns = ["リスト名", "コイン", "勝敗", "デッキ", "理由"]
-    else:
-        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
-    return df
+    if os.path.exists(DATA_FILE):
+        df = pd.read_csv(DATA_FILE)
+        # 必要なカラムのチェックと補正
+        if "username" in df.columns:
+            user_df = df[df["username"] == username]
+            if not user_df.empty:
+                # 古い列名や形式の調整
+                if "list_name" in user_df.columns:
+                    res_df = user_df[["list_name", "coin", "result", "deck", "memo"]].copy()
+                    res_df.columns = ["リスト名", "コイン", "勝敗", "デッキ", "理由"]
+                    return res_df
+    return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
 
 def save_match_data(username, list_name, coin, result, deck, memo):
-    ws = get_worksheet("match_logs")
-    ws.append_row([username, list_name, coin, result, deck, memo])
+    df_all = load_match_data_all()
+    new_row = pd.DataFrame([{
+        "username": username,
+        "list_name": list_name,
+        "coin": coin,
+        "result": result,
+        "deck": deck,
+        "memo": memo if memo else ""
+    }])
+    df_all = pd.concat([df_all, new_row], ignore_index=True)
+    df_all.to_csv(DATA_FILE, index=False)
 
-def delete_last_match(username, list_name):
-    ws = get_worksheet("match_logs")
-    data = ws.get_all_values()
-    if len(data) <= 1:
+def load_match_data_all():
+    if os.path.exists(DATA_FILE):
+        return pd.read_csv(DATA_FILE)
+    else:
+        return pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
+
+def delete_last_match(username, selected_list):
+    df_all = load_match_data_all()
+    user_rows = df_all[(df_all["username"] == username) & (df_all["list_name"] == selected_list)]
+    if user_rows.empty:
         return False
+    # 最後の1行を削除
+    last_idx = user_rows.index[-1]
+    df_all = df_all.drop(last_idx)
+    df_all.to_csv(DATA_FILE, index=False)
+    return True
+
+def delete_list_data(username, selected_list):
+    df_all = load_match_data_all()
+    df_all = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
+    df_all.to_csv(DATA_FILE, index=False)
+
+    df_decks = load_all_decks_raw()
+    df_decks = df_decks[~((df_decks["username"] == username) & (df_decks["list_name"] == selected_list))]
+    df_decks.to_csv(DECKS_FILE, index=False)
+
+def update_all_match_data_for_user(username, selected_list, new_filtered_df):
+    df_all = load_match_data_all()
+    # 他のユーザー・他のリストのデータを保持
+    df_other = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
     
-    rows = data[1:]
-    target_idx = -1
-    for i in range(len(rows) - 1, -1, -1):
-        row = rows[i]
-        if len(row) >= 2 and row[0] == username and row[1] == list_name:
-            target_idx = i + 2
-            break
-            
-    if target_idx != -1:
-        ws.delete_rows(target_idx)
-        return True
-    return False
-
-def delete_list_data(username, list_name):
-    ws_logs = get_worksheet("match_logs")
-    data_logs = ws_logs.get_all_values()
-    if len(data_logs) > 1:
-        header = data_logs[0]
-        rows = data_logs[1:]
-        new_rows = [header] + [r for r in rows if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
-        ws_logs.clear()
-        ws_logs.update(new_rows)
-        
-    ws_decks = get_worksheet("user_decks")
-    data_decks = ws_decks.get_all_values()
-    if len(data_decks) > 1:
-        header_d = data_decks[0]
-        rows_d = data_decks[1:]
-        new_rows_d = [header_d] + [r for r in rows_d if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
-        ws_decks.clear()
-        ws_decks.update(new_rows_d)
-
-def update_all_match_data_for_user(username, list_name, new_df_filtered):
-    ws = get_worksheet("match_logs")
-    data = ws.get_all_values()
-    if not data:
-        return
-    header = data[0]
-    rows = data[1:]
-    
-    other_rows = [r for r in rows if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
-    
-    updated_user_rows = []
-    for _, r in new_df_filtered.iterrows():
-        updated_user_rows.append([username, list_name, r["コイン"], r["勝敗"], r["デッキ"], r["理由"]])
-        
-    final_data = [header] + other_rows + updated_user_rows
-    ws.clear()
-    ws.update(final_data)
+    new_rows = []
+    for _, r in new_filtered_df.iterrows():
+        new_rows.append({
+            "username": username,
+            "list_name": selected_list,
+            "coin": r["コイン"],
+            "result": r["勝敗"],
+            "deck": r["デッキ"],
+            "memo": r["理由"] if pd.notna(r["理由"]) else ""
+        })
+    df_new = pd.DataFrame(new_rows)
+    df_combined = pd.concat([df_other, df_new], ignore_index=True)
+    df_combined.to_csv(DATA_FILE, index=False)
 
 
-# 3. デッキリスト関連
+# --- デッキリストデータ管理関数 ---
 def load_deck_lists(username):
-    ws = get_worksheet("user_decks")
-    records = ws.get_all_records()
-    
-    user_rows = [r for r in records if str(r.get("username")) == str(username)]
+    df_decks = load_all_decks_raw()
+    user_rows = df_decks[df_decks["username"] == username]
     
     deck_lists = {}
-    if user_rows:
-        for r in user_rows:
-            list_name = str(r.get("list_name"))
-            idx = int(r.get("deck_index", 0))
-            deck_name = str(r.get("deck_name", ""))
+    if not user_rows.empty:
+        for _, r in user_rows.iterrows():
+            list_name = str(r["list_name"])
+            idx = int(r["deck_index"])
+            deck_name = str(r["deck_name"]) if pd.notna(r["deck_name"]) else ""
             
             if list_name not in deck_lists:
                 deck_lists[list_name] = [""] * 10
@@ -210,22 +157,28 @@ def load_deck_lists(username):
         }
     return deck_lists
 
+def load_all_decks_raw():
+    if os.path.exists(DECKS_FILE):
+        return pd.read_csv(DECKS_FILE)
+    else:
+        return pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
+
 def save_deck_lists(username, deck_lists):
-    ws = get_worksheet("user_decks")
-    data = ws.get_all_values()
-    header = data[0] if len(data) > 0 else ["username", "list_name", "deck_index", "deck_name"]
+    df_all = load_all_decks_raw()
+    df_other = df_all[df_all["username"] != username]
     
-    rows = data[1:] if len(data) > 1 else []
-    other_user_rows = [r for r in rows if len(r) >= 1 and r[0] != username]
-    
-    new_user_rows = []
+    new_rows = []
     for list_name, decks in deck_lists.items():
         for idx, deck_name in enumerate(decks):
-            new_user_rows.append([username, list_name, idx, deck_name])
-            
-    final_data = [header] + other_user_rows + new_user_rows
-    ws.clear()
-    ws.update(final_data)
+            new_rows.append({
+                "username": username,
+                "list_name": list_name,
+                "deck_index": idx,
+                "deck_name": deck_name if deck_name else ""
+            })
+    df_new = pd.DataFrame(new_rows)
+    df_combined = pd.concat([df_other, df_new], ignore_index=True)
+    df_combined.to_csv(DECKS_FILE, index=False)
 
 
 # ==========================================
@@ -477,16 +430,9 @@ if not df.empty:
             )
             
             if st.button("💾 メモの変更を保存する"):
-                df_all = load_match_data(st.session_state.username)
-                df_other = df_all[df_all["リスト名"] != selected_list]
-                
                 edited_df["リスト名"] = selected_list
-                edited_df = edited_df[["リスト名", "コイン", "勝敗", "デッキ", "理由"]]
-                
-                df_combined = pd.concat([df_other, edited_df], ignore_index=True)
-                
-                update_all_match_data_for_user(st.session_state.username, selected_list, df_combined[df_combined["リスト名"] == selected_list])
-                st.success("✨ メモの変更をスプレッドシートに保存しました！")
+                update_all_match_data_for_user(st.session_state.username, selected_list, edited_df)
+                st.success("✨ メモの変更を保存しました！")
                 st.rerun()
     else:
         col_graph.info("グラフにするデータがありません。")
