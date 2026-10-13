@@ -3,8 +3,6 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
-import json
-import base64
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -30,7 +28,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
 
-# --- Googleスプレッドシート接続の初期化（Base64完璧版） ---
+# --- Googleスプレッドシート接続の初期化 ---
 def get_gspread_client():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -40,18 +38,28 @@ def get_gspread_client():
     # 1. ローカル環境（credentials.jsonがある場合）
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-    # 2. Streamlit Cloud環境（Base64のSecretsがある場合）
-    elif "gcp_base64" in st.secrets:
-        try:
-            # 余分な空白やクォートを取り除く
-            b64_string = str(st.secrets["gcp_base64"]).strip().strip('"').strip("'")
-            # Base64をデコードしてJSONの辞書に戻す
-            json_bytes = base64.b64decode(b64_string)
-            key_dict = json.loads(json_bytes.decode("utf-8"))
-            creds = Credentials.from_service_account_info(key_dict, scopes=scope)
-        except Exception as e:
-            st.error(f"❌ 認証情報のデコードに失敗しました。\nエラー詳細: {e}")
-            st.stop()
+    # 2. Streamlit Cloud環境（Secretsから個別項目を読み込む場合）
+    elif "gcp_service_account" in st.secrets:
+        sec = st.secrets["gcp_service_account"]
+        
+        # 秘密鍵の改行コード（\n）を確実に復元する処理
+        raw_key = str(sec["private_key"])
+        fixed_key = raw_key.replace("\\n", "\n")
+        
+        key_dict = {
+            "type": sec["type"],
+            "project_id": sec["project_id"],
+            "private_key_id": sec["private_key_id"],
+            "private_key": fixed_key,
+            "client_email": sec["client_email"],
+            "client_id": sec["client_id"],
+            "auth_uri": sec["auth_uri"],
+            "token_uri": sec["token_uri"],
+            "auth_provider_x509_cert_url": sec["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": sec["client_x509_cert_url"],
+            "universe_domain": sec.get("universe_domain", "googleapis.com")
+        }
+        creds = Credentials.from_service_account_info(key_dict, scopes=scope)
     else:
         st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
         st.stop()
@@ -481,7 +489,7 @@ if not df.empty:
                 
                 df_combined = pd.concat([df_other, edited_df], ignore_index=True)
                 
-                update_all_match_data_for_user(st.session_state.username, selected_list, df_combined[df_combined["リスト名"] == selected_list])
+                update_all_match_data_for_user(st.session_state.username, selected_list, df_combined[df_combined["リストName"] != selected_list] if "リストName" in df_combined.columns else df_combined[df_combined["リスト名"] == selected_list])
                 st.success("✨ メモの変更をスプレッドシートに保存しました！")
                 st.rerun()
     else:
