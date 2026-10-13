@@ -40,16 +40,21 @@ def get_gspread_client():
     # 1. ローカル環境（credentials.jsonがある場合）
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
+
+
     # 2. Streamlit Cloud環境（Base64エンコードされた Secrets がある場合）
     elif "gcp_base64" in st.secrets:
         try:
-            base64_str = st.secrets["gcp_base64"]
+            # 前後の空白や誤って入ったクォーテーションを自動で取り除く処理を追加
+            base64_str = st.secrets["gcp_base64"].strip().strip('"').strip("'")
             json_str = base64.b64decode(base64_str).decode("utf-8")
             key_dict = json.loads(json_str)
             creds = Credentials.from_service_account_info(key_dict, scopes=scope)
         except Exception as e:
             st.error(f"❌ Base64シークレットのデコードに失敗しました。設定を確認してください。\nエラー詳細: {e}")
             st.stop()
+
+            
     else:
         st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
         st.stop()
@@ -486,4 +491,3 @@ if not df.empty:
         col_graph.info("グラフにするデータがありません。")
 else:
     col_graph.info("データがありません。")
-    
