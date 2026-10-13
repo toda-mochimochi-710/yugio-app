@@ -3,8 +3,6 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
-import json
-import base64
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -30,7 +28,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
 
-# --- Googleスプレッドシート接続の初期化（Base64対応・安全版） ---
+# --- Googleスプレッドシート接続の初期化（完全安定版） ---
 def get_gspread_client():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -40,15 +38,36 @@ def get_gspread_client():
     # 1. ローカル環境（credentials.jsonがある場合）
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-    # 2. Streamlit Cloud環境（Base64エンコードされた Secrets がある場合）
-    elif "gcp_base64" in st.secrets:
+    # 2. Streamlit Cloud環境（Secretsがある場合）
+    elif "gcp_service_account" in st.secrets:
         try:
-            base64_str = st.secrets["gcp_base64"].strip().strip('"').strip("'")
-            decoded_bytes = base64.b64decode(base64_str)
-            key_dict = json.loads(decoded_bytes.decode("utf-8", errors="ignore"))
+            sec = st.secrets["gcp_service_account"]
+            # 秘密鍵の改行抜けやエスケープ崩れをここで完全に修復する
+            raw_key = str(sec["private_key"])
+            if "-----BEGIN PRIVATE KEY-----" in raw_key and "\n" not in raw_key.strip():
+                # 1行で記述されている場合に改行を復元
+                fixed_key = raw_key.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n")
+                fixed_key = fixed_key.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----")
+                # 中身のスペースを改行に置換（必要に応じて）
+            else:
+                fixed_key = raw_key.replace("\\n", "\n")
+
+            key_dict = {
+                "type": sec["type"],
+                "project_id": sec["project_id"],
+                "private_key_id": sec["private_key_id"],
+                "private_key": fixed_key,
+                "client_email": sec["client_email"],
+                "client_id": sec["client_id"],
+                "auth_uri": sec["auth_uri"],
+                "token_uri": sec["token_uri"],
+                "auth_provider_x509_cert_url": sec["auth_provider_x509_cert_url"],
+                "client_x509_cert_url": sec["client_x509_cert_url"],
+                "universe_domain": sec.get("universe_domain", "googleapis.com")
+            }
             creds = Credentials.from_service_account_info(key_dict, scopes=scope)
         except Exception as e:
-            st.error(f"❌ Base64シークレットのデコードに失敗しました。設定を確認してください。\nエラー詳細: {e}")
+            st.error(f"❌ 認証情報の読み込みに失敗しました。\nエラー詳細: {e}")
             st.stop()
     else:
         st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
