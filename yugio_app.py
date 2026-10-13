@@ -1,9 +1,10 @@
 import streamlit as st
-import sqlite3
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- matplotlibの日本語化設定 ---
 import matplotlib
@@ -23,112 +24,149 @@ st.set_page_config(
 
 # --- ファイルパスの設定 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "yugio_database.db")
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
+CRED_FILE = os.path.join(BASE_DIR, "credentials.json")
 
-# --- データベースの初期化 ---
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # ユーザーテーブル
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password TEXT
-        )
-    ''')
-    # 対戦履歴テーブル（ユーザー名ごとにデータを分離）
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS match_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            list_name TEXT,
-            coin TEXT,
-            result TEXT,
-            deck TEXT
-        )
-    ''')
-    # 【追加】デッキリスト・リスト名を保存するテーブル
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS user_decks (
-            username TEXT,
-            list_name TEXT,
-            deck_index INTEGER,
-            deck_name TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# --- Googleスプレッドシート接続の初期化 ---
+def get_gspread_client():
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    if not os.path.exists(CRED_FILE):
+        st.error("❌ 認証ファイル 'credentials.json' が見つかりません。ファイルの位置を確認してください。")
+        st.stop()
+    
+    creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
+    client = gspread.authorize(creds)
+    return client
 
-init_db()
+def get_worksheet(sheet_name):
+    try:
+        client = get_gspread_client()
+        # スプレッドシート名「遊戯王対戦管理データ」を開く
+        spreadsheet = client.open("遊戯王対戦管理データ")
+        worksheet = spreadsheet.worksheet(sheet_name)
+        return worksheet
+    except Exception as e:
+        st.error(f"❌ Googleスプレッドシート「遊戯王対戦管理データ」のシート「{sheet_name}」が見つかりません。スプレッドシート名やタブ名を確認してください。\nエラー詳細: {e}")
+        st.stop()
 
-# --- パスワードのハッシュ化（安全な保存） ---
+
+# --- パスワードのハッシュ化 ---
 def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_password(password, hashed_password):
     return make_hash(password) == hashed_password
 
-# --- データベース操作関数 ---
+
+# --- データベース操作（スプレッドシート版） ---
+
+# 1. ユーザー認証関連
+def get_user_password(username_input):
+    ws = get_worksheet("users")
+    records = ws.get_all_records()
+    for row in records:
+        if str(row.get("username")) == str(username_input):
+            return row.get("password")
+    return None
+
+def register_user(username_input, password_input):
+    ws = get_worksheet("users")
+    records = ws.get_all_records()
+    for row in records:
+        if str(row.get("username")) == str(username_input):
+            return False # すでに存在する
+    hashed_pw = make_hash(password_input)
+    ws.append_row([username_input, hashed_pw])
+    return True
+
+
+# 2. 対戦履歴関連
 def load_match_data(username):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query(
-        "SELECT list_name, coin, result, deck FROM match_logs WHERE username = ?", 
-        conn, 
-        params=(username,)
-    )
-    conn.close()
-    # カラム名を日本語に統一
-    df.columns = ["リスト名", "コイン", "勝敗", "デッキ"]
+    ws = get_worksheet("match_logs")
+    records = ws.get_all_records()
+    
+    # 該当ユーザーのデータだけをフィルタリング
+    user_rows = [r for r in records if str(r.get("username")) == str(username)]
+    
+    if not user_rows:
+        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ"])
+    
+    df = pd.DataFrame(user_rows)
+    # 必要なカラムに絞る
+    if "list_name" in df.columns:
+        df = df[["list_name", "coin", "result", "deck"]]
+        df.columns = ["リスト名", "コイン", "勝敗", "デッキ"]
+    else:
+        return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ"])
     return df
 
 def save_match_data(username, list_name, coin, result, deck):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO match_logs (username, list_name, coin, result, deck) VALUES (?, ?, ?, ?, ?)",
-        (username, list_name, coin, result, deck)
-    )
-    conn.commit()
-    conn.close()
+    ws = get_worksheet("match_logs")
+    ws.append_row([username, list_name, coin, result, deck])
 
 def delete_last_match(username, list_name):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # 該当ユーザーかつ該当リストの最新の行のIDを取得
-    c.execute(
-        "SELECT id FROM match_logs WHERE username = ? AND list_name = ? ORDER BY id DESC LIMIT 1",
-        (username, list_name)
-    )
-    row = c.fetchone()
-    if row:
-        row_id = row[0]
-        c.execute("DELETE FROM match_logs WHERE id = ?", (row_id,))
-        conn.commit()
-        conn.close()
+    ws = get_worksheet("match_logs")
+    data = ws.get_all_values()
+    if len(data) <= 1:
+        return False
+    
+    header = data[0]
+    rows = data[1:]
+    
+    # 後ろから順に該当する行を探す
+    target_idx = -1
+    for i in range(len(rows) - 1, -1, -1):
+        row = rows[i]
+        # 列のインデックス構成: username(0), list_name(1), coin(2), result(3), deck(4)
+        if len(row) >= 2 and row[0] == username and row[1] == list_name:
+            target_idx = i + 2  # 1-indexedかつヘッダーを考慮
+            break
+            
+    if target_idx != -1:
+        ws.delete_rows(target_idx)
         return True
-    conn.close()
     return False
 
 def delete_list_data(username, list_name):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM match_logs WHERE username = ? AND list_name = ?", (username, list_name))
-    c.execute("DELETE FROM user_decks WHERE username = ? AND list_name = ?", (username, list_name))
-    conn.commit()
-    conn.close()
+    # match_logsから削除
+    ws_logs = get_worksheet("match_logs")
+    data_logs = ws_logs.get_all_values()
+    if len(data_logs) > 1:
+        header = data_logs[0]
+        rows = data_logs[1:]
+        # 残す行だけを抽出
+        new_rows = [header] + [r for r in rows if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
+        ws_logs.clear()
+        ws_logs.update(new_rows)
+        
+    # user_decksからも削除
+    ws_decks = get_worksheet("user_decks")
+    data_decks = ws_decks.get_all_values()
+    if len(data_decks) > 1:
+        header_d = data_decks[0]
+        rows_d = data_decks[1:]
+        new_rows_d = [header_d] + [r for r in rows_d if not (len(r) >= 2 and r[0] == username and r[1] == list_name)]
+        ws_decks.clear()
+        ws_decks.update(new_rows_d)
 
-# --- デッキリストの読み込み・保存関数 ---
+
+# 3. デッキリスト関連
 def load_deck_lists(username):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT list_name, deck_index, deck_name FROM user_decks WHERE username = ?", (username,))
-    rows = c.fetchall()
-    conn.close()
+    ws = get_worksheet("user_decks")
+    records = ws.get_all_records()
+    
+    user_rows = [r for r in records if str(r.get("username")) == str(username)]
     
     deck_lists = {}
-    if rows:
-        for list_name, idx, deck_name in rows:
+    if user_rows:
+        for r in user_rows:
+            list_name = str(r.get("list_name"))
+            idx = int(r.get("deck_index", 0))
+            deck_name = str(r.get("deck_name", ""))
+            
             if list_name not in deck_lists:
                 deck_lists[list_name] = [""] * 10
             if 0 <= idx < 10:
@@ -141,17 +179,23 @@ def load_deck_lists(username):
     return deck_lists
 
 def save_deck_lists(username, deck_lists):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM user_decks WHERE username = ?", (username,))
+    ws = get_worksheet("user_decks")
+    data = ws.get_all_values()
+    header = data[0] if len(data) > 0 else ["username", "list_name", "deck_index", "deck_name"]
+    
+    # 該当ユーザー以外の既存データを保持
+    rows = data[1:] if len(data) > 1 else []
+    other_user_rows = [r for r in rows if len(r) >= 1 and r[0] != username]
+    
+    # 新しいユーザーデータを構築
+    new_user_rows = []
     for list_name, decks in deck_lists.items():
         for idx, deck_name in enumerate(decks):
-            c.execute(
-                "INSERT INTO user_decks (username, list_name, deck_index, deck_name) VALUES (?, ?, ?, ?)",
-                (username, list_name, idx, deck_name)
-            )
-    conn.commit()
-    conn.close()
+            new_user_rows.append([username, list_name, idx, deck_name])
+            
+    final_data = [header] + other_user_rows + new_user_rows
+    ws.clear()
+    ws.update(final_data)
 
 
 # ==========================================
@@ -173,16 +217,11 @@ if not st.session_state.logged_in:
         
         if choice == "ログイン":
             if st.button("🚀 ログイン"):
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("SELECT password FROM users WHERE username = ?", (username_input,))
-                result = c.fetchone()
-                conn.close()
+                stored_pw = get_user_password(username_input)
                 
-                if result and check_password(password_input, result[0]):
+                if stored_pw and check_password(password_input, stored_pw):
                     st.session_state.logged_in = True
                     st.session_state.username = username_input
-                    # ログイン時にデータベースからユーザー専用のデッキリストを読み込む
                     st.session_state.deck_lists = load_deck_lists(username_input)
                     st.success("ログイン成功しました！")
                     st.rerun()
@@ -194,20 +233,11 @@ if not st.session_state.logged_in:
                 if not username_input or not password_input:
                     st.warning("ユーザー名とパスワードを入力してください。")
                 else:
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("SELECT username FROM users WHERE username = ?", (username_input,))
-                    exists = c.fetchone()
-                    
-                    if exists:
-                        st.error("このユーザー名はすでに使われています。")
-                        conn.close()
-                    else:
-                        hashed_pw = make_hash(password_input)
-                        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username_input, hashed_pw))
-                        conn.commit()
-                        conn.close()
+                    success = register_user(username_input, password_input)
+                    if success:
                         st.success("アカウント登録が完了しました！「ログイン」に切り替えてログインしてください。")
+                    else:
+                        st.error("このユーザー名はすでに使われています。")
     st.stop()
 
 
@@ -215,7 +245,6 @@ if not st.session_state.logged_in:
 # ログイン後のメインアプリ画面
 # ==========================================
 
-# セッション状態の初期化（未だ読み込まれていない場合の保険）
 if 'deck_lists' not in st.session_state:
     st.session_state.deck_lists = load_deck_lists(st.session_state.username)
 
@@ -248,7 +277,6 @@ new_list_name = st.sidebar.text_input("新しいリスト名 (例: リスト2)")
 if st.sidebar.button("➕ リストを追加"):
     if new_list_name and new_list_name not in st.session_state.deck_lists:
         st.session_state.deck_lists[new_list_name] = [""] * 10
-        # データベースに保存
         save_deck_lists(st.session_state.username, st.session_state.deck_lists)
         st.sidebar.success(f"「{new_list_name}」を追加しました！")
         st.rerun()
@@ -271,7 +299,6 @@ for i in range(10):
 
 if st.sidebar.button("💾 変更を保存"):
     st.session_state.deck_lists[selected_list] = updated_decks
-    # 【変更点】データベースにデッキリストの変更を保存する
     save_deck_lists(st.session_state.username, st.session_state.deck_lists)
     st.sidebar.success("保存しました！")
     st.rerun()
@@ -281,7 +308,6 @@ st.sidebar.markdown("---")
 if len(st.session_state.deck_lists) > 1:
     if st.sidebar.button(f"🗑️ 「{selected_list}」を削除する"):
         del st.session_state.deck_lists[selected_list]
-        # データベースからも削除して保存
         save_deck_lists(st.session_state.username, st.session_state.deck_lists)
         delete_list_data(st.session_state.username, selected_list)
         st.sidebar.success(f"「{selected_list}」を削除しました！")
@@ -335,7 +361,7 @@ with col_input:
                     else:
                         d_val = active_decks[d_idx - 1]
                         
-                        # データベースに保存
+                        # スプレッドシートに保存
                         save_match_data(st.session_state.username, selected_list, c_val, w_val, d_val)
                         
                         st.success(f"👉 記録しました！ コイン:{c_val} / 勝敗:{w_val} / デッキ:{d_val}")
