@@ -19,11 +19,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- ファイルパスの設定（クラウド上でも安全に動く構成） ---
+# --- ファイルパスの設定 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_FILE = os.path.join(BASE_DIR, "icon.png")
 DATA_FILE = os.path.join(BASE_DIR, "yugio_match_data.csv")
 DECKS_FILE = os.path.join(BASE_DIR, "yugio_deck_data.csv")
+USERS_FILE = os.path.join(BASE_DIR, "yugio_users.csv")
 
 # --- パスワードのハッシュ化 ---
 def make_hash(password):
@@ -32,13 +33,35 @@ def make_hash(password):
 def check_password(password, hashed_password):
     return make_hash(password) == hashed_password
 
-# --- 簡易ユーザー管理（初期ユーザー用） ---
-# ※Web版で確実に動かすため、初期アカウントやファイルベースで管理します
-@st.cache_data
-def get_default_user():
-    return {"とだ": make_hash("Ryoma710")}
+# --- ユーザー管理関数（CSVベース） ---
+def load_users():
+    if os.path.exists(USERS_FILE):
+        return pd.read_csv(USERS_FILE)
+    else:
+        # 初期ユーザー（とだ / Ryoma710）を作成
+        df_init = pd.DataFrame([{"username": "とだ", "password": make_hash("Ryoma710")}])
+        df_init.to_csv(USERS_FILE, index=False)
+        return df_init
 
-# --- データ読み書き関数（CSVベース・確実動作版） ---
+def get_user_password(username_input):
+    df_users = load_users()
+    for _, row in df_users.iterrows():
+        if str(row["username"]) == str(username_input):
+            return row["password"]
+    return None
+
+def register_user(username_input, password_input):
+    df_users = load_users()
+    if not df_users[df_users["username"] == username_input].empty:
+        return False  # すでに存在するユーザー
+    
+    hashed_pw = make_hash(password_input)
+    new_row = pd.DataFrame([{"username": username_input, "password": hashed_pw}])
+    df_users = pd.concat([df_users, new_row], ignore_index=True)
+    df_users.to_csv(USERS_FILE, index=False)
+    return True
+
+# --- 対戦データ管理関数 ---
 def load_all_matches():
     if os.path.exists(DATA_FILE):
         return pd.read_csv(DATA_FILE)
@@ -58,11 +81,11 @@ def save_match_row(username, list_name, coin, result, deck, memo):
     df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(DATA_FILE, index=False)
 
+# --- デッキデータ管理関数 ---
 def load_all_decks():
     if os.path.exists(DECKS_FILE):
         return pd.read_csv(DECKS_FILE)
     else:
-        # デフォルトデッキ
         default_decks = []
         initial_list = ["エルフェン", "ドラテ(烙印ドラテ)", "獄神", "純烙印", "道化の一座", "妖精伝姫", "キラーチューン", "M∀LICE", "召喚獣(召喚獣ドラテ)", "閃刀姫"]
         for idx, d_name in enumerate(initial_list):
@@ -73,7 +96,6 @@ def load_all_decks():
 
 def save_user_decks(username, deck_lists):
     df_all = load_all_decks()
-    # 該当ユーザー以外のデータを保持
     df_other = df_all[df_all["username"] != username]
     
     new_rows = []
@@ -91,7 +113,7 @@ def save_user_decks(username, deck_lists):
 
 
 # ==========================================
-# ログイン画面の制御
+# ログイン・新規登録画面の制御
 # ==========================================
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -101,20 +123,32 @@ if not st.session_state.logged_in:
     col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
     with col_l2:
         st.title("🎮 遊戯王 対戦管理アプリ")
-        st.markdown("### ログインしてください")
+        st.markdown("### ログインまたは新規登録してください")
         
-        username_input = st.text_input("ユーザー名", value="とだ")
-        password_input = st.text_input("パスワード", type="password", value="Ryoma710")
+        choice = st.selectbox("メニュー", ["ログイン", "新規アカウント登録"])
+        username_input = st.text_input("ユーザー名")
+        password_input = st.text_input("パスワード", type="password")
         
-        if st.button("🚀 ログイン"):
-            users = get_default_user()
-            if username_input in users and check_password(password_input, users[username_input]):
-                st.session_state.logged_in = True
-                st.session_state.username = username_input
-                st.success("ログイン成功しました！")
-                st.rerun()
-            else:
-                st.error("ユーザー名またはパスワードが間違っています。")
+        if choice == "ログイン":
+            if st.button("🚀 ログイン"):
+                stored_pw = get_user_password(username_input)
+                if stored_pw and check_password(password_input, stored_pw):
+                    st.session_state.logged_in = True
+                    st.session_state.username = username_input
+                    st.success("ログイン成功しました！")
+                    st.rerun()
+                else:
+                    st.error("ユーザー名またはパスワードが間違っています。")
+        else:
+            if st.button("✨ 登録する"):
+                if not username_input or not password_input:
+                    st.warning("ユーザー名とパスワードを入力してください。")
+                else:
+                    success = register_user(username_input, password_input)
+                    if success:
+                        st.success("アカウント登録が完了しました！「ログイン」に切り替えてログインしてください。")
+                    else:
+                        st.error("このユーザー名はすでに使われています。")
     st.stop()
 
 
@@ -123,7 +157,6 @@ if not st.session_state.logged_in:
 # ==========================================
 username = st.session_state.username
 
-# デッキリストの読み込み
 df_decks = load_all_decks()
 user_deck_rows = df_decks[df_decks["username"] == username]
 
@@ -178,7 +211,7 @@ if st.sidebar.button("💾 変更を保存"):
 
 active_decks = [d for d in deck_lists[selected_list] if d.strip() != ""]
 
-# =================.=========
+# ==========================================
 # メイン画面
 # ==========================================
 col_input, col_graph = st.columns([1, 1])
