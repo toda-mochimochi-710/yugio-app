@@ -35,14 +35,17 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # 1. まず自分のパソコン（ローカル）に credentials.json がある場合はそちらを優先する
+    # 1. 自分のパソコン（ローカル）に credentials.json がある場合
     if os.path.exists(CRED_FILE):
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
-    # 2. なければ Streamlit Cloud の Secrets を探す
+    # 2. Streamlit Cloud の Secrets を使う場合
     elif "gcp_service_account" in st.secrets:
-        creds = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=scope
-        )
+        # 秘密鍵の改行文字('\n')が崩れている場合に自動修復する処理
+        secret_dict = dict(st.secrets["gcp_service_account"])
+        if "private_key" in secret_dict:
+            secret_dict["private_key"] = secret_dict["private_key"].replace("\\n", "\n")
+            
+        creds = Credentials.from_service_account_info(secret_dict, scopes=scope)
     else:
         st.error("❌ 認証情報（credentials.json または Streamlit Secrets）が見つかりません。")
         st.stop()
