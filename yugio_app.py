@@ -3,6 +3,10 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
+import base64
+import json
+import urllib.request
+import urllib.error
 
 # --- matplotlibの設定 ---
 plt.rcParams['axes.unicode_minus'] = False
@@ -21,57 +25,172 @@ DATA_FILE = os.path.join(BASE_DIR, "yugio_match_data.csv")
 DECKS_FILE = os.path.join(BASE_DIR, "yugio_deck_data.csv")
 USERS_FILE = os.path.join(BASE_DIR, "yugio_users.csv")
 
+
+# ==========================================
+# GitHub 自動同期関数（スリープ時のデータ消失防止）
+# ==========================================
+def get_github_config():
+    """StreamlitのSecretsからGitHub設定を取得"""
+    try:
+        token = st.secrets.get("GITHUB_TOKEN", "").strip()
+        repo = st.secrets.get("GITHUB_REPO", "").strip()
+        branch = st.secrets.get("GITHUB_BRANCH", "main").strip()
+        if token and repo:
+            return {"token": token, "repo": repo, "branch": branch}
+    except Exception:
+        pass
+    return None
+
+def push_file_to_github(local_filepath, commit_message="Update CSV data"):
+    """ローカルのCSVファイルをGitHubリポジトリへ自動保存"""
+    config = get_github_config()
+    if not config or not os.path.exists(local_filepath):
+        return False
+
+    filename = os.path.basename(local_filepath)
+    api_url = f"https://api.github.com/repos/{config['repo']}/contents/{filename}"
+    headers = {
+        "Authorization": f"token {config['token']}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "User-Agent": "Streamlit-Yugioh-App"
+    }
+
+    # 1. すでにGitHub上にファイルがある場合はSHAを取得
+    sha = None
+    try:
+        req = urllib.request.Request(f"{api_url}?ref={config['branch']}", headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read().decode("utf-8"))
+            sha = data.get("sha")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return False
+    except Exception:
+        return False
+
+    # 2. ファイルをBase64エンコードしてGitHubへ送信（PUT）
+    try:
+        with open(local_filepath, "rb") as f:
+            content_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        payload = {
+            "message": commit_message,
+            "content": content_b64,
+            "branch": config["branch"]
+        }
+        if sha:
+            payload["sha"] = sha
+
+        req_put = urllib.request.Request(
+            api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="PUT"
+        )
+        with urllib.request.urlopen(req_put, timeout=10) as res:
+            return res.status in (200, 201)
+    except Exception:
+        return False
+
+def pull_file_from_github(local_filepath):
+    """GitHubリポジトリから最新のCSVファイルを取得してローカルに保存"""
+    config = get_github_config()
+    if not config:
+        return False
+
+    filename = os.path.basename(local_filepath)
+    api_url = f"https://api.github.com/repos/{config['repo']}/contents/{filename}?ref={config['branch']}"
+    headers = {
+        "Authorization": f"token {config['token']}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Streamlit-Yugioh-App"
+    }
+
+    try:
+        req = urllib.request.Request(api_url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as res:
+            data = json.loads(res.read().decode("utf-8"))
+            if "content" in data:
+                content_bytes = base64.b64decode(data["content"])
+                with open(local_filepath, "wb") as f:
+                    f.write(content_bytes)
+                return True
+    except Exception:
+        pass
+    return False
+
+def sync_all_from_github():
+    """3つのCSVファイルをすべてGitHubから最新化"""
+    for filepath in [USERS_FILE, DATA_FILE, DECKS_FILE]:
+        pull_file_from_github(filepath)
+
+# 初回アクセス時にGitHubから最新データを取得
+if "github_synced" not in st.session_state:
+    sync_all_from_github()
+    st.session_state.github_synced = True
+
+
 # --- パスワードのハッシュ化 ---
 def make_hash(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
+    return hashlib.sha256(str.encode(str(password))).hexdigest()
 
 def check_password(password, hashed_password):
-    return make_hash(password) == hashed_password
+    return make_hash(password) == str(hashed_password)
 
-# --- ユーザー管理関数（CSVベース） ---
+# --- ユーザー管理関数（CSVベース + GitHub同期） ---
 def load_users():
     if os.path.exists(USERS_FILE):
-        return pd.read_csv(USERS_FILE)
-    else:
-        df_init = pd.DataFrame([{"username": "とだ", "password": make_hash("Ryoma710")}])
-        df_init.to_csv(USERS_FILE, index=False)
-        return df_init
+        try:
+            df = pd.read_csv(USERS_FILE, dtype=str).fillna("")
+            if "username" in df.columns and "password" in df.columns:
+                return df
+        except Exception:
+            pass
+    df_init = pd.DataFrame([{"username": "とだ", "password": make_hash("Ryoma710")}])
+    df_init.to_csv(USERS_FILE, index=False)
+    push_file_to_github(USERS_FILE, "Initialize users CSV")
+    return df_init
 
 def get_user_password(username_input):
     df_users = load_users()
     for _, row in df_users.iterrows():
         if str(row["username"]) == str(username_input):
-            return row["password"]
+            return str(row["password"])
     return None
 
 def register_user(username_input, password_input):
+    pull_file_from_github(USERS_FILE)
     df_users = load_users()
-    if not df_users[df_users["username"] == username_input].empty:
+    if not df_users[df_users["username"].astype(str) == str(username_input)].empty:
         return False
     hashed_pw = make_hash(password_input)
-    new_row = pd.DataFrame([{"username": username_input, "password": hashed_pw}])
+    new_row = pd.DataFrame([{"username": str(username_input), "password": hashed_pw}])
     df_users = pd.concat([df_users, new_row], ignore_index=True)
     df_users.to_csv(USERS_FILE, index=False)
+    push_file_to_github(USERS_FILE, f"Register user: {username_input}")
     return True
 
 # --- 対戦履歴データ管理関数 ---
 def load_match_data_all():
     if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE)
-        expected_cols = ["username", "list_name", "coin", "result", "deck", "memo"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = ""
-        return df
-    else:
-        return pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
+        try:
+            df = pd.read_csv(DATA_FILE, dtype=str).fillna("")
+            expected_cols = ["username", "list_name", "coin", "result", "deck", "memo"]
+            for col in expected_cols:
+                if col not in df.columns:
+                    df[col] = ""
+            return df[expected_cols]
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
 
 def load_match_data(username):
     df_all = load_match_data_all()
     if df_all.empty:
         return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
     
-    user_df = df_all[df_all["username"] == username].copy()
+    user_df = df_all[df_all["username"].astype(str) == str(username)].copy()
     if user_df.empty:
         return pd.DataFrame(columns=["リスト名", "コイン", "勝敗", "デッキ", "理由"])
     
@@ -85,54 +204,63 @@ def load_match_data(username):
     return res_df.reset_index(drop=True)
 
 def save_match_data(username, list_name, coin, result, deck, memo):
+    pull_file_from_github(DATA_FILE)
     df_all = load_match_data_all()
     new_row = pd.DataFrame([{
-        "username": username,
-        "list_name": list_name,
-        "coin": coin,
-        "result": result,
-        "deck": deck,
-        "memo": memo if memo else ""
+        "username": str(username),
+        "list_name": str(list_name),
+        "coin": str(coin),
+        "result": str(result),
+        "deck": str(deck),
+        "memo": str(memo) if memo else ""
     }])
     df_all = pd.concat([df_all, new_row], ignore_index=True)
     df_all.to_csv(DATA_FILE, index=False)
+    push_file_to_github(DATA_FILE, f"Add match by {username}")
 
 def delete_last_match(username, selected_list):
+    pull_file_from_github(DATA_FILE)
     df_all = load_match_data_all()
     if df_all.empty:
         return False
-    user_mask = (df_all["username"] == username) & (df_all["list_name"] == selected_list)
+    user_mask = (df_all["username"].astype(str) == str(username)) & (df_all["list_name"].astype(str) == str(selected_list))
     user_indices = df_all[user_mask].index
     if len(user_indices) == 0:
         return False
     last_idx = user_indices[-1]
     df_all = df_all.drop(last_idx)
     df_all.to_csv(DATA_FILE, index=False)
+    push_file_to_github(DATA_FILE, f"Delete last match by {username}")
     return True
 
 def delete_list_data(username, selected_list):
+    pull_file_from_github(DATA_FILE)
     df_all = load_match_data_all()
     if not df_all.empty:
-        df_all = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
+        df_all = df_all[~((df_all["username"].astype(str) == str(username)) & (df_all["list_name"].astype(str) == str(selected_list)))]
         df_all.to_csv(DATA_FILE, index=False)
+        push_file_to_github(DATA_FILE, f"Delete list match data: {selected_list} by {username}")
 
+    pull_file_from_github(DECKS_FILE)
     df_decks = load_all_decks_raw()
     if not df_decks.empty:
-        df_decks = df_decks[~((df_decks["username"] == username) & (df_decks["list_name"] == selected_list))]
+        df_decks = df_decks[~((df_decks["username"].astype(str) == str(username)) & (df_decks["list_name"].astype(str) == str(selected_list)))]
         df_decks.to_csv(DECKS_FILE, index=False)
+        push_file_to_github(DECKS_FILE, f"Delete deck list: {selected_list} by {username}")
 
 def update_all_match_data_for_user(username, selected_list, new_filtered_df):
+    pull_file_from_github(DATA_FILE)
     df_all = load_match_data_all()
     if not df_all.empty:
-        df_other = df_all[~((df_all["username"] == username) & (df_all["list_name"] == selected_list))]
+        df_other = df_all[~((df_all["username"].astype(str) == str(username)) & (df_all["list_name"].astype(str) == str(selected_list)))]
     else:
         df_other = pd.DataFrame(columns=["username", "list_name", "coin", "result", "deck", "memo"])
     
     new_rows = []
     for _, r in new_filtered_df.iterrows():
         new_rows.append({
-            "username": username,
-            "list_name": selected_list,
+            "username": str(username),
+            "list_name": str(selected_list),
             "coin": str(r["コイン"]),
             "result": str(r["勝敗"]),
             "deck": str(r["デッキ"]),
@@ -141,29 +269,35 @@ def update_all_match_data_for_user(username, selected_list, new_filtered_df):
     df_new = pd.DataFrame(new_rows)
     df_combined = pd.concat([df_other, df_new], ignore_index=True)
     df_combined.to_csv(DATA_FILE, index=False)
+    push_file_to_github(DATA_FILE, f"Update match memo by {username}")
 
 
 # --- デッキリストデータ管理関数 ---
 def load_all_decks_raw():
     if os.path.exists(DECKS_FILE):
-        df = pd.read_csv(DECKS_FILE)
-        expected_cols = ["username", "list_name", "deck_index", "deck_name"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = ""
-        return df
-    else:
-        return pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
+        try:
+            df = pd.read_csv(DECKS_FILE, dtype=str).fillna("")
+            expected_cols = ["username", "list_name", "deck_index", "deck_name"]
+            for col in expected_cols:
+                if col not in df.columns:
+                    df[col] = ""
+            return df[expected_cols]
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
 
 def load_deck_lists(username):
     df_decks = load_all_decks_raw()
-    user_rows = df_decks[df_decks["username"] == username]
+    user_rows = df_decks[df_decks["username"].astype(str) == str(username)]
     
     deck_lists = {}
     if not user_rows.empty:
         for _, r in user_rows.iterrows():
             list_name = str(r["list_name"])
-            idx = int(r["deck_index"]) if pd.notna(r["deck_index"]) else 0
+            try:
+                idx = int(float(r["deck_index"])) if str(r["deck_index"]).strip() != "" else 0
+            except ValueError:
+                idx = 0
             deck_name = str(r["deck_name"]) if pd.notna(r["deck_name"]) else ""
             
             if list_name not in deck_lists:
@@ -177,9 +311,10 @@ def load_deck_lists(username):
     return deck_lists
 
 def save_deck_lists(username, deck_lists):
+    pull_file_from_github(DECKS_FILE)
     df_all = load_all_decks_raw()
     if not df_all.empty:
-        df_other = df_all[df_all["username"] != username]
+        df_other = df_all[df_all["username"].astype(str) != str(username)]
     else:
         df_other = pd.DataFrame(columns=["username", "list_name", "deck_index", "deck_name"])
     
@@ -187,14 +322,15 @@ def save_deck_lists(username, deck_lists):
     for list_name, decks in deck_lists.items():
         for idx, deck_name in enumerate(decks):
             new_rows.append({
-                "username": username,
-                "list_name": list_name,
-                "deck_index": idx,
-                "deck_name": deck_name if deck_name else ""
+                "username": str(username),
+                "list_name": str(list_name),
+                "deck_index": str(idx),
+                "deck_name": str(deck_name) if deck_name else ""
             })
     df_new = pd.DataFrame(new_rows)
     df_combined = pd.concat([df_other, df_new], ignore_index=True)
     df_combined.to_csv(DECKS_FILE, index=False)
+    push_file_to_github(DECKS_FILE, f"Update deck lists by {username}")
 
 
 # ==========================================
@@ -216,6 +352,7 @@ if not st.session_state.logged_in:
         
         if choice == "ログイン":
             if st.button("🚀 ログイン"):
+                sync_all_from_github()
                 stored_pw = get_user_password(username_input)
                 if stored_pw and check_password(password_input, stored_pw):
                     st.session_state.logged_in = True
@@ -260,6 +397,13 @@ if st.sidebar.button("🚪 ログアウト"):
     if 'deck_lists' in st.session_state:
         del st.session_state.deck_lists
     st.rerun()
+
+# --- GitHub自動保存ステータスの表示 ---
+gh_config = get_github_config()
+if gh_config:
+    st.sidebar.success("🟢 GitHub自動保存: 有効")
+else:
+    st.sidebar.warning("⚠️ GitHub自動保存: 未設定（Secretsを設定してください）")
 
 st.sidebar.markdown("---")
 
@@ -309,6 +453,22 @@ if len(st.session_state.deck_lists) > 1:
 else:
     st.sidebar.info("ℹ️ リストが1つしかないため削除できません。")
 
+# --- 手動バックアップ（CSVダウンロード） ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("📥 データのバックアップ保存"):
+    user_df_backup = load_match_data(st.session_state.username)
+    csv_bytes = user_df_backup.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="📄 自分の対戦履歴をCSV保存",
+        data=csv_bytes,
+        file_name=f"yugioh_backup_{st.session_state.username}.csv",
+        mime="text/csv"
+    )
+    if st.button("🔄 最新データを再読み込み"):
+        sync_all_from_github()
+        st.session_state.deck_lists = load_deck_lists(st.session_state.username)
+        st.rerun()
+
 active_decks = [d for d in st.session_state.deck_lists[selected_list] if d.strip() != ""]
 
 
@@ -351,7 +511,9 @@ with col_input:
                     c_val = coin_dict.get(c_idx, "")
                     w_val = win_dict.get(w_idx, "")
                     
-                    if d_idx < 1 or d_idx > len(active_decks):
+                    if c_val == "" or w_val == "":
+                        st.error("❌ コインと勝敗は 1(○) または 2(✖) で入力してください。")
+                    elif d_idx < 1 or d_idx > len(active_decks):
                         st.error(f"❌ デッキ番号は 1 〜 {len(active_decks)} の間で入力してください。")
                     else:
                         d_val = active_decks[d_idx - 1]
@@ -439,15 +601,13 @@ with col_graph.expander("📜 対戦履歴の明細を見る（メモの直接�
     else:
         st.info("まだ対戦履歴がありません。左側の入力欄から記録を追加してください。")
 
-# 円グラフ描画（グラフ内にはアルファベットや番号のみを表示し、文字化けを100%回避）
+# 円グラフ描画
 if not df.empty:
     df_filtered = df[df["リスト名"] == selected_list].copy()
     if not df_filtered.empty and "デッキ" in df_filtered.columns:
         deck_counts = df_filtered["デッキ"].value_counts()
         if len(deck_counts) > 0:
             fig, ax = plt.subplots(figsize=(5, 4))
-            
-            # グラフ上のラベルには英語のインデックス（Deck A, Deck B...）を使用し、文字化けを完全に防ぐ
             labels = [f"Deck {chr(65+i)}" for i in range(len(deck_counts))]
             
             ax.pie(
@@ -461,7 +621,6 @@ if not df.empty:
             ax.axis('equal')
             col_graph.pyplot(fig)
             
-            # 下部に「Deck A = デッキ名」の対応表をテキストで綺麗に表示
             col_graph.markdown("**【グラフのデッキ対応表】**")
             legend_text = "  \n".join([f"**Deck {chr(65+i)}**: {deck_name} ({count}回)" for i, (deck_name, count) in enumerate(deck_counts.items())])
             col_graph.markdown(legend_text)
